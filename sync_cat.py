@@ -1,80 +1,89 @@
-import os, time
+import os
+import time
+from optparse import OptionParser
 
+# Constants for clarity
 SECTOR_SIZE = 512
 BYTE_SIZE_MULTIPLIER = 100
+CHUNK_SIZE = SECTOR_SIZE * BYTE_SIZE_MULTIPLIER
 
-def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, length = 100, fill = '=', printEnd = "\r"):
+def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=40, fill='='):
     """
-    Call in a loop to create terminal progress bar
-    @params:
-        iteration   - Required  : current iteration (Int)
-        total       - Required  : total iterations (Int)
-        prefix      - Optional  : prefix string (Str)
-        suffix      - Optional  : suffix string (Str)
-        decimals    - Optional  : positive number of decimals in percent complete (Int)
-        length      - Optional  : character length of bar (Int)
-        fill        - Optional  : bar fill character (Str)
-        printEnd    - Optional  : end character (e.g. "\r", "\r\n") (Str)
-    Refernce: https://gist.github.com/snakers4/91fa21b9dda9d055a02ecd23f24fbc3d
+    Standard terminal progress bar.
     """
     percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-    filledLength = int(length * iteration // total)
-    bar = fill * filledLength + '-' * (length - filledLength)
-    print(f'\r{prefix} [{bar}] {percent}% {suffix}', end = printEnd)
-    # Print New Line on Complete
-    if iteration == total: 
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} [{bar}] {percent}% {suffix}', end='')
+    if iteration >= total:
         print()
 
 def main(src, dest):
-    with open(dest, "r+b") as dest_f:
-        dest_size = os.path.getsize(dest)
-        src_size = os.path.getsize(src)
-        dest_last_pos = int(dest_size*0.99) # get last 1% byte for confirmation
-        dest_f.seek(dest_last_pos)
-        target = dest_f.read()
-        len_target = len(target)
-        with open(src, "rb") as src_f:
-            # navigate to same position as destination file
-            src_f.seek(dest_last_pos)
-            # read confirmation byte from source file
-            source = src_f.read(len_target)
-            if source == target:
-                # sync the position of source and destination file
-                src_f.seek(dest_last_pos + len_target, 0)
-                dest_f.seek(dest_size, 0)
-                
-                dest_f_pos = dest_f.tell()
-                i = 0
-                last_timer = timer = time.time()
-                speed = 0
-                printProgressBar(dest_f_pos, src_size, prefix = 'Syncing file:', suffix = 'Completed (0MB/s)', length = 40)
-                while dest_f_pos < src_size: # Start to sync file from this block
-                    timer = time.time()
-                    byte_to_write = SECTOR_SIZE * BYTE_SIZE_MULTIPLIER
-                    if dest_f_pos + byte_to_write > src_size:
-                        byte_to_write = src_size - dest_f_pos
-                    dest_f.write(src_f.read(byte_to_write))
-                    dest_f.flush()
-                    dest_f_pos = dest_f.tell()
-                    
-                    i += 1
-                    if timer - last_timer >= 1: # update the rate every second
-                        last_timer = timer
-                        speed = int(byte_to_write/1024/1024 * i)
-                        i = 0
-                    printProgressBar(dest_f_pos, src_size, prefix = 'Syncing file:', suffix = f'Completed ({speed}MB/s)', length = 40)
-                    
-            else:
-                pass
-    
+    src_size = os.path.getsize(src)
+    dest_size = os.path.getsize(dest)
+
+    if dest_size >= src_size:
+        print("Destination is already the same size or larger than source.")
+        return
+
+    # Open both files: dest in r+b (read/update), src in rb (read)
+    with open(dest, "r+b") as dest_f, open(src, "rb") as src_f:
+        # 1. Validation: Compare the last 1% of the existing destination data
+        # to the same section in the source to ensure they match.
+        check_offset = int(dest_size * 0.99)
+        dest_f.seek(check_offset)
+        src_f.seek(check_offset)
+        
+        chunk_to_check = dest_f.read()
+        if src_f.read(len(chunk_to_check)) != chunk_to_check:
+            print("Error: Destination file content does not match source. Cannot resume.")
+            return
+
+        # 2. Preparation for Resume
+        dest_f.seek(0, os.SEEK_END)
+        current_pos = dest_f.tell()
+        src_f.seek(current_pos)
+
+        # 3. Transfer Loop
+        last_time = time.time()
+        bytes_since_last_update = 0
+        speed = 0
+
+        print_progress_bar(current_pos, src_size, prefix='Syncing:', suffix='0 MB/s')
+
+        while current_pos < src_size:
+            chunk = src_f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            
+            dest_f.write(chunk)
+            current_pos += len(chunk)
+            bytes_since_last_update += len(chunk)
+
+            # Update speed calculation every 1 second
+            now = time.time()
+            elapsed = now - last_time
+            if elapsed >= 1.0:
+                speed = (bytes_since_last_update / (1024 * 1024)) / elapsed
+                last_time = now
+                bytes_since_last_update = 0
+            
+            print_progress_bar(
+                current_pos, 
+                src_size, 
+                prefix='Syncing:', 
+                suffix=f'{speed:.2f} MB/s'
+            )
+
 if __name__ == "__main__":
-    from optparse import OptionParser
-    parser = OptionParser(version='1')
+    parser = OptionParser(usage="usage: %prog [source] [destination]", version='1.1')
     (options, args) = parser.parse_args()
+
     if len(args) == 2:
-        if os.path.isfile(args[0]) and os.path.isfile(args[1]):
-            main(args[0], args[1])
+        src_path, dest_path = args
+        if os.path.isfile(src_path) and os.path.isfile(dest_path):
+            main(src_path, dest_path)
         else:
-            exit("Path(s) you entered is not valid")
+            print("Error: One or both paths are invalid or do not exist.")
     else:
-        exit("You must provide exactly two paths.")
+        parser.print_help()
